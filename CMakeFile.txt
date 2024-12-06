@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.13)
+project(DCP LANGUAGES C)
+
+# Add the DCP library
+add_library(DCP STATIC DCP.c)
+
+# Specify the include directory for the library
+target_include_directories(DCP PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
