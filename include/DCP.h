@@ -1,26 +1,26 @@
 #ifndef __DCP__
 #define __DCP__
 
-#include <cstdbool.h>
+#include <stdbool.h>
 #include <stdint.h>
-
+#include <stdlib.h>
 
 enum e_Flags {
     FLAG_Instant        = 0u,
-    FLAG_Assynchronous  = 1u << 1
+    FLAG_Assynchronous  = 1u
 };
 
 typedef struct{
     uint8_t addr;
     union{
-        e_Flags e_flags;
+        enum e_Flags e_flags;
         unsigned int flags; //TODO change var size?
     } flags;
     bool isController;
     enum {SLOW = 0, FAST1, FAST2, ULTRA} speed;
 }DCP_MODE;
 
-bool Init(int busPin, DCP_MODE mode);
+bool DCPInit(int busPin, DCP_MODE mode);
 
 typedef struct{
     enum DCP_Message_type_e {MESSAGE_SYNC = 0u, MESSAGE_L3, MESSAGE_GENERIC} type;
