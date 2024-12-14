@@ -5,23 +5,28 @@
  * @brief generic definition of function that delays for microsseconds
  * @param delayUS time to delay in microsseconds 
  */
-void Delay(const unsigned int delayUS);
-
-#ifdef __ESP32__
+static void Delay(const uint32_t delayNS);
 
 #include <rom/ets_sys.h>
-#include <FreeRTOS/task.h>
-#include <FreeRTOS/portmacro.h>
-#include <driver/gpio>
-#include <esp_clk.h>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/portmacro.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+
+#include <driver/gpio.h>
+#include <esp_private/esp_clk.h>
 #include <esp_log.h>
 
 static char* TAG = "DCP Driver";
 
 portMUX_TYPE criticalMutex = portMUX_INITIALIZER_UNLOCKED;
 volatile DCP_MODE busMode;
+
 QueueHandle_t RXmessageQueue = NULL;
 QueueHandle_t TXmessageQueue = NULL;
+
 SemaphoreHandle_t isrSemaphore = NULL;
 
 static const float deltaLUT[] = {20, 4, 2.5, 1.25};
@@ -29,24 +34,24 @@ volatile struct {
     float delta;
 } configParam;
 
-static const uint32_t CLOCK_TO_TIME = 1/esp_clk_cpu_freq();
+static uint32_t CLOCK_TO_TIME;
 
 /*
  * THIS FUNCTION SHOULD ONLY BE CALLED IN A CRITICAL SECTION
  *
  */
-__attribute__((always_inline)) void Delay(const uint32_t delayNS){
+static __attribute__((always_inline)) void Delay(const uint32_t delayNS){
     esp_cpu_set_cycle_count(0);
 
     const esp_cpu_cycle_count_t ticks = delayNS/CLOCK_TO_TIME;
 
     //TODO overflow is assumed to not happen, it won't always be the case
     while (esp_cpu_get_cycle_count() < ticks)
-        volatile asm ("nop");
+        asm ("nop");
 }
 
 static void BusISR(void* arg){
-    gpio_num_t pin = (gpio_num_t*)*arg;
+    (void)arg;
     xSemaphoreGiveFromISR(isrSemaphore, NULL);
 }
 
@@ -89,14 +94,15 @@ static uint8_t s_ReadByte(const gpio_num_t pin){
  */
 void _Noreturn busHandler(void* arg){
 
-    const gpio_num_t pin = (gpio_num_t*)*arg;
+    const gpio_num_t pin = *((gpio_num_t*)arg);
     enum {STARTING, LISTENING, SENDING, WAITING, READING, END_} state = STARTING;
 
     //precalculation
-    const unsigned float listeningDelayPartial = configParam.delta / 4f;
-    const unsigned int syncDelayPartial = mode.isController? 
+    const float listeningDelayPartial = configParam.delta / 4.0;
+    const unsigned int syncDelayPartial = busMode.isController? 
                                             25*configParam.delta:
                                             50*configParam.delta;
+    uint8_t senderAddr, receiverAddr;
 
     DCP_Message_t *message = NULL;
 
@@ -139,17 +145,17 @@ void _Noreturn busHandler(void* arg){
 
                 gpio_set_direction(pin, GPIO_MODE_INPUT);
 
-                switch(message.type){
+                switch(message->type){
                     case MESSAGE_SYNC:
                         break;
                     case MESSAGE_L3:
                         break;
                     default:
-                        for (int i = 0; i < message.size; ++i){
+                        for (int i = 0; i < message->size; ++i){
                             //TODO check for endianess
                             for (int j = 8; j != 0; --j){
                                 gpio_set_direction(pin, GPIO_MODE_INPUT);
-                                delay(2*configParam.delta);
+                                Delay(2*configParam.delta);
 
                                 //collision
                                 if (gpio_get_level(pin) == 0){
@@ -159,13 +165,17 @@ void _Noreturn busHandler(void* arg){
 
                                 gpio_set_direction(pin, GPIO_MODE_OUTPUT);
                                 gpio_set_level(pin, 0);
-                                delay((message.payload[i] >> j) & 0x1 == 0?
+
+                                //bus modulation
+                                // if bit == 0: low for 2 delta
+                                // else: low for 1 delta
+                                Delay(((message->payload[i] >> j) & 0x1) == 0?
                                         configParam.delta:
                                         2*configParam.delta);
                                 gpio_set_direction(pin, GPIO_MODE_INPUT);
 
                                 //collision
-                                if (gpio_get_level(pin) == 0){
+                                if(xSemaphoreTake(isrSemaphore, 0) == pdTRUE){
                                     state = LISTENING;
                                     continue;
                                 }
@@ -186,7 +196,7 @@ void _Noreturn busHandler(void* arg){
                 }
                  
                 //message to send
-                if (xQueueReceive(TXmessageQueue, &(message), 1) == pdPass){
+                if (xQueueReceive(TXmessageQueue, &(message), 1) == pdPASS){
                     state = LISTENING;
                 }
                 break;
@@ -202,13 +212,18 @@ void _Noreturn busHandler(void* arg){
 
                 //reading origin address
                 for (int i = 0; i<8; ++i){
-                    buf_addr[i] = s_ReadBit(pin);
+                    senderAddr |= s_ReadBit(pin) << i;
                 }
 
                 //reading destination address?
                 for (int i = 0; i<8; ++i){
-                    buf_addr[i] = s_ReadBit(pin);
-                    //TODO if not destination, go wait
+                    receiverAddr |= s_ReadBit(pin) << i;
+                }
+
+                if (receiverAddr != busMode.addr){
+                    //TODO (BUG) got to wait to the end of transmission
+                    state = WAITING;
+                    continue;
                 }
 
                 message = malloc(sizeof * message);
@@ -236,16 +251,21 @@ void _Noreturn busHandler(void* arg){
                 //theorethically i'm sending the memory pointer of message, the variable will
                 //be overwritten with a new address but the address will be stored in the queue
                 //for interface access.
-                xQueueSend(RXmessageQueue, &message, portTICK_PERIOD_MS(50));
+                xQueueSend(RXmessageQueue, &message, pdMS_TO_TICKS(50));
 
                 state = LISTENING;
 
+                break;
+            default:
+                ESP_LOGE(TAG, "this code should not be executed, possible corruption");
                 break;
         }
     }
 }
 
-bool Init(int busPin, DCP_MODE mode){
+bool DCPInit(int busPin, DCP_MODE mode){
+
+    CLOCK_TO_TIME = 1/esp_clk_cpu_freq();
 
     gpio_config_t conf = {
         .pin_bit_mask = 1<<busPin,
@@ -254,9 +274,19 @@ bool Init(int busPin, DCP_MODE mode){
     };
     
     if(gpio_config(&conf)) return false;
+    
+    isrSemaphore = xSemaphoreCreateBinary();
+    if (isrSemaphore == NULL){
+        ESP_LOGE(TAG, "could not create ISR semaphore");
+
+        return false;
+    }
 
     if(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL6)) return false;
-    if(gpio_isr_handler_add(busPin, &BusISR, &busPin)){
+    if(gpio_isr_handler_add(busPin, &BusISR, NULL)){
+        ESP_LOGE(TAG, "could not register gpio ISR");
+
+        vSemaphoreDelete(isrSemaphore);
 
         return false;
     }
@@ -270,6 +300,8 @@ bool Init(int busPin, DCP_MODE mode){
     if (!RXmessageQueue){
         gpio_isr_handler_remove(busPin);
 
+        vSemaphoreDelete(isrSemaphore);
+
         return false;
     } 
     ESP_LOGD(TAG, "RX queue created");
@@ -277,6 +309,8 @@ bool Init(int busPin, DCP_MODE mode){
     TXmessageQueue = xQueueCreate(8, sizeof(DCP_Message_t));
     if (!TXmessageQueue){
         gpio_isr_handler_remove(busPin);
+
+        vSemaphoreDelete(isrSemaphore);
 
         vQueueDelete(RXmessageQueue);
 
@@ -292,6 +326,8 @@ bool Init(int busPin, DCP_MODE mode){
 
         gpio_isr_handler_remove(busPin);
 
+        vSemaphoreDelete(isrSemaphore);
+
         vQueueDelete(RXmessageQueue);
         vQueueDelete(TXmessageQueue);
         
@@ -304,18 +340,13 @@ bool Init(int busPin, DCP_MODE mode){
 
 bool SendMessage(const DCP_Message_t message, const uint8_t addr){
 
-    if (xQueueSend(messageQueue, &message, portMAX_DELAY) != pdTRUE)
+    if (xQueueSend(TXmessageQueue, &message, portMAX_DELAY) != pdTRUE)
         return false;
 
     return true;
 }
 
 uint8_t ReadByte(){
-
-    if (instant){
-
-        return 0;
-    }
 
     return 0;
 }
@@ -324,8 +355,8 @@ DCP_Message_t* ReadMessage(){
 
     DCP_Message_t* message = NULL;
 
-    if (instant){
-        if (xQueueReceive(RXmessageQueue, &message, portMAX_DELAY) == pdTrue){
+    if ((busMode.flags.flags & 0x1) == FLAG_Instant){
+        if (xQueueReceive(RXmessageQueue, &message, portMAX_DELAY) == pdTRUE){
             ESP_LOGD(TAG, "message received %s", message->payload);
 
             return message;
@@ -334,7 +365,7 @@ DCP_Message_t* ReadMessage(){
         return NULL;
     }
 
-    if (xQueueReceive(RXmessageQueue, &message, portMAX_DELAY) == pdTrue){
+    if (xQueueReceive(RXmessageQueue, &message, portMAX_DELAY) == pdTRUE){
         ESP_LOGD(TAG, "message received %s", message->payload);
 
         return message;
@@ -342,11 +373,3 @@ DCP_Message_t* ReadMessage(){
 
     return NULL;
 }
-
-#ifdef __RPICO__
-
-#else
-
-#endif
-
-
