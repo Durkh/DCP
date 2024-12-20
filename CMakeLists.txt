@@ -2,7 +2,11 @@ cmake_minimum_required(VERSION 3.24)
 project(DCP LANGUAGES C)
 
 # Add the DCP library
-add_library(DCP STATIC DCP.c)
+if (ESP32)
+    add_library(DCP STATIC ESP/DCP.c)
+elseif(RPICO2)
+    add_library(DCP STATIC RPICO2/DCP.c)
+endif()
 
 # Specify the include directory for the library
 target_include_directories(DCP PUBLIC
