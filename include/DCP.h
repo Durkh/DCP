@@ -23,13 +23,13 @@ typedef struct{
 bool DCPInit(const unsigned int busPin, const DCP_MODE mode);
 
 struct DCP_Message_L3_t{
-    uint8_t SOH;
-    uint8_t IDS;
-    uint8_t IDD;
-    uint8_t COD;
-    uint8_t data[6];
-    uint8_t PAD;
-    uint8_t CRC;
+    uint8_t SOH;        //header
+    uint8_t IDS;        //source ID
+    uint8_t IDD;        //destinaiton ID
+    uint8_t COD;        //instruction code
+    uint8_t data[6];    //data
+    uint8_t PAD;        //padding
+    uint8_t CRC;        //CRC
 };
 
 struct DCP_Message_Generic_t{
@@ -38,8 +38,7 @@ struct DCP_Message_Generic_t{
 };
 
 struct DCP_Message_t {
-    //by definition, the type is either: SYNC, L3, or the number of bytes to be sent.
-    enum __attribute__((__packed__)) DCP_Message_type_e {MESSAGE_SYNC = 0u, MESSAGE_L3 = 1u} type;
+    uint8_t type;
     union {
         struct DCP_Message_L3_t L3;
         struct DCP_Message_Generic_t generic;
