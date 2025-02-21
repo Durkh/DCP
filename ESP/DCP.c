@@ -204,6 +204,7 @@ void _Noreturn busHandler(void* arg){
 
                 //while in the delay, did someone take the bus?
                 if(ulTaskNotifyTake(pdTRUE, 0)){
+                    ESP_LOGV(TAG, "someone took the bus");
                     state = WAITING;
                     continue;
                 }
@@ -217,6 +218,7 @@ void _Noreturn busHandler(void* arg){
                     continue;
                 }
 
+                gpio_set_level(2, 0);
                 gpio_set_direction(pin, GPIO_MODE_OUTPUT);
                 gpio_set_level(pin, 0);
 
@@ -227,9 +229,10 @@ void _Noreturn busHandler(void* arg){
                 Delay((uint32_t)(8 * delays[2]));
 
                 gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-                gpio_set_level(pin, 1);
+                gpio_set_level(pin, 0);
 
                 Delay((uint32_t)(8 * delays[2]));
+                gpio_set_level(2, 1);
 
                 //leaving the bus still low not to interfere in the first bit
                 __attribute__((fallthrough));
@@ -238,6 +241,7 @@ void _Noreturn busHandler(void* arg){
                 assert(message.data != NULL);
 
                 taskENTER_CRITICAL(&criticalMutex);
+                gpio_set_level(2, 0);
 
                 gpio_set_direction(pin, GPIO_MODE_INPUT);
                 collision = s_SendBytes(pin,
@@ -248,10 +252,12 @@ void _Noreturn busHandler(void* arg){
                 taskEXIT_CRITICAL(&criticalMutex);
 
                 if (collision){
+                    ESP_LOGV(TAG, "Collision detected");
                     state = LISTENING;
                     continue;
                 }
 
+                gpio_set_level(2, 1);
                 free(message.data);
 
                 ESP_LOGV(TAG, "successfully sent message, going to wait mode");
@@ -423,7 +429,15 @@ DCP_Data_t* CreateMessage(const struct DCP_Message_t* message){
 
 bool SendMessage(const DCP_Data_t message){
 
-    ESP_LOGD(TAG, "sending message: %s", message.message->generic.payload);
+
+#ifdef ESP_LOGD
+    if (message.message->type){
+        ESP_LOGD(TAG, "sending message: %s", message.message->generic.payload);
+    } else {
+        ESP_LOGD(TAG, "sending L3 message");
+    }
+#endif
+
 
     if (xQueueSend(TXmessageQueue, (void*)&(message.data), portMAX_DELAY) != pdTRUE){
         ESP_LOGE(TAG, "could not send message to queue");
@@ -444,13 +458,13 @@ struct DCP_Message_t* ReadMessage(){
             if (message.message->type){
                 ESP_LOGD(TAG, "generic message received: %s", message.message->generic.payload);
             } else {
-                    ESP_LOGD(TAG, "L3 message received: %u\t%u\t%u\t%u\t%u\t%u",
+                    ESP_LOGD(TAG, "L3 message received: %x\t%x\t%x\t%x\t%x\t%x",
                              message.message->L3.data[0],
                              message.message->L3.data[1],
                              message.message->L3.data[2],
                              message.message->L3.data[3],
                              message.message->L3.data[4],
-                             message.message->L3.data[5],
+                             message.message->L3.data[5]
                              );
             }
 #endif
@@ -467,13 +481,13 @@ struct DCP_Message_t* ReadMessage(){
             if (message.message->type){
                 ESP_LOGD(TAG, "generic message received: %s", message.message->generic.payload);
             } else {
-                    ESP_LOGD(TAG, "L3 message received: %u\t%u\t%u\t%u\t%u\t%u",
+                    ESP_LOGD(TAG, "L3 message received: %x\t%x\t%x\t%x\t%x\t%x",
                              message.message->L3.data[0],
                              message.message->L3.data[1],
                              message.message->L3.data[2],
                              message.message->L3.data[3],
                              message.message->L3.data[4],
-                             message.message->L3.data[5],
+                             message.message->L3.data[5]
                              );
             }
 #endif
