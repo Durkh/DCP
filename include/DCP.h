@@ -1,6 +1,10 @@
 #ifndef __DCP__
 #define __DCP__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -10,7 +14,7 @@ enum e_Flags {
     FLAG_Assynchronous  = 0b1
 };
 
-typedef struct{
+typedef struct DCP_MODE{
     uint8_t addr;
     union{
         enum e_Flags e_flags;
@@ -54,6 +58,10 @@ typedef union {
 
 bool SendMessage(const DCP_Data_t message);
 struct DCP_Message_t* ReadMessage();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 

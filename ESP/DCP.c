@@ -1,6 +1,6 @@
 #include "DCP.h"
 #include "esp_cpu.h"
-#include "hal/gpio_types.h"
+#include "freertos/ringbuf.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -24,6 +24,7 @@ volatile DCP_MODE busMode;
 
 QueueHandle_t RXmessageQueue = NULL;
 QueueHandle_t TXmessageQueue = NULL;
+RingbufHandle_t isrBuf = NULL;
 
 TaskHandle_t busTask = NULL;
 
@@ -52,16 +53,6 @@ static __attribute__((always_inline)) inline void Delay(const esp_cpu_cycle_coun
     taskEXIT_CRITICAL(&criticalMutex);
 }
 
-static void BusISR(void* arg){
-    (void)arg;
-
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    vTaskNotifyGiveFromISR(busTask, &xHigherPriorityTaskWoken);
-
-    portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
-}
-
 static inline bool s_ReadBit(const gpio_num_t pin){
     
     while (gpio_get_level(pin) == 0)
@@ -83,6 +74,50 @@ static uint8_t s_ReadByte(const gpio_num_t pin){
     }
 
     return byte;
+}
+
+static void BusISR(void* arg){
+    const gpio_num_t pin = (gpio_num_t)arg;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    static uint8_t data[0xFF];
+
+    vTaskNotifyGiveFromISR(busTask, &xHigherPriorityTaskWoken);
+
+    //reading incoming data
+    gpio_set_direction(pin, GPIO_MODE_INPUT);
+    gpio_set_level(2, 0);
+
+    //wait for SYNC to end
+    while(gpio_get_level(pin) == 0) continue;
+
+    gpio_set_level(2, 1);
+    for (esp_cpu_set_cycle_count(0); gpio_get_level(pin) == 1; ){
+        if(esp_cpu_get_cycle_count() > 10*configParam.limits[1]){
+            portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+            return;
+        }
+    }
+
+    if(esp_cpu_get_cycle_count() <= 6*configParam.limits[0]){
+        portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+        return;
+    }
+
+    gpio_set_level(2, 0);
+
+    data[0] = s_ReadByte(pin);
+    const uint8_t flag = data[0]? data[0]: sizeof(struct DCP_Message_L3_t)+1;
+
+    for (int i = 1; i < flag; ++i){
+        gpio_set_level(2, 1);
+        data[i] = s_ReadByte(pin);
+        gpio_set_level(2, 0);
+    }
+
+    (void)xRingbufferSendFromISR(isrBuf, data, flag, 0);
+    gpio_set_level(2, 1);
+
+    portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
 }
 
 static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t const data[size], unsigned const delays[restrict 3]){
@@ -119,7 +154,6 @@ static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t
             //collision
             if(gpio_get_level(pin) == 0){
                 return true;
-
             }
         }
     }
@@ -173,8 +207,9 @@ void _Noreturn busHandler(void* arg){
     ESP_LOGV(TAG, "calculated delays:\n\tlistening: %lu cycles\n\tsync: %lu cycles\n\tbit 0: %lu cycles\n\tbit 1: %lu cycles", delays[0], delays[1], delays[2], delays[3]);
 
     //variables
-    DCP_Data_t message = {.data = malloc(255 * sizeof(uint8_t))};
-    DCP_Data_t buffer = {0};
+    size_t rbSize;
+    uint8_t* rbItem;
+    DCP_Data_t message = {0};
     bool collision = false;
 
     assert(RXmessageQueue != NULL);
@@ -218,20 +253,24 @@ void _Noreturn busHandler(void* arg){
                     continue;
                 }
 
+                //sync signal
                 gpio_set_level(2, 0);
                 gpio_set_direction(pin, GPIO_MODE_OUTPUT);
                 gpio_set_level(pin, 0);
 
                 Delay(delays[1]);
 
+                //bit sync signal
+                //high part
                 gpio_set_direction(pin, GPIO_MODE_INPUT);
-
                 Delay((uint32_t)(8 * delays[2]));
 
+                //bit sync signal
+                //low part
                 gpio_set_direction(pin, GPIO_MODE_OUTPUT);
                 gpio_set_level(pin, 0);
-
                 Delay((uint32_t)(8 * delays[2]));
+
                 gpio_set_level(2, 1);
 
                 //leaving the bus still low not to interfere in the first bit
@@ -271,71 +310,26 @@ void _Noreturn busHandler(void* arg){
                 state = WAITING;
 
                 //message to read
-                if(gpio_get_level(pin) == 0){
-                    taskENTER_CRITICAL(&criticalMutex);
+                if( (rbItem = xRingbufferReceive(isrBuf, &rbSize, 1)) != NULL ){
                     state = READING;
                     break;
                 }
                  
                 //message to send
-                if (xQueueReceive(TXmessageQueue, &(message.data), 0) == pdPASS){
+                if (xQueueReceive(TXmessageQueue, &(message.data), 1) == pdPASS){
                     state = LISTENING;
                     break;
                 }
 
                 break;
             case READING:
-                //reading incoming data
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
-                gpio_set_level(2, 0);
+                message.data = malloc(rbSize * sizeof(uint8_t));
+                memmove(message.data, item, rbSize);
 
-                //wait for SYNC to end
-                while(gpio_get_level(pin) == 0) continue;
+                vRingbufferReturnItem(isrBuf, item);
 
-                gpio_set_level(2, 1);
-                for (esp_cpu_set_cycle_count(0); gpio_get_level(pin) == 1; ){
-                    if(esp_cpu_get_cycle_count() > 10*configParam.limits[1]){
-                        taskEXIT_CRITICAL(&criticalMutex);
-                        state = WAITING;
-                        break;
-                    }
-                }
+                xQueueSend(RXmessageQueue, &(message.data), pdMS_TO_TICKS(15));
 
-                esp_cpu_cycle_count_t c = esp_cpu_get_cycle_count();
-                if (state == WAITING) break;
-
-                if(c <= 6*configParam.limits[0]){
-                    taskEXIT_CRITICAL(&criticalMutex);
-                    ESP_LOGE("aaa", "sync2: %lu", c);
-                    state = WAITING;
-                    break;
-                }
-
-                gpio_set_level(2, 0);
-
-                message.data[0] = s_ReadByte(pin);
-                const uint8_t flag = message.data[0]? message.data[0]: sizeof(struct DCP_Message_L3_t)+1;
-
-                for (int i = 1; i < flag; ++i){
-                    gpio_set_level(2, 1);
-                    message.data[i] = s_ReadByte(pin);
-                    gpio_set_level(2, 0);
-                }
-
-                taskEXIT_CRITICAL(&criticalMutex);
-
-                buffer.data = malloc(flag * sizeof(uint8_t));
-                if (!buffer.data){
-                    ESP_LOGE(TAG, "could not allocate memory to receive message");
-                    state = WAITING;
-                    continue;
-                }
-
-                memmove(buffer.data, message.data, flag);
-
-                xQueueSend(RXmessageQueue, &(buffer.data), pdMS_TO_TICKS(10));
-
-                gpio_set_level(2, 1);
                 state = WAITING;
                 break;
             default:
@@ -407,8 +401,9 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     }
     ESP_LOGI(TAG, "bus arbitrator task created");
 
-    if(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3) || gpio_isr_handler_add(pin, BusISR, NULL)){
-        ESP_LOGE(TAG, "could not register gpio ISR");
+    isrBuf = xRingbufferCreate(0xFF0, RINGBUF_TYPE_NOSPLIT);
+    if(isrBuf == NULL){
+        ESP_LOGE(TAG, "could not create ISR buffer");
 
         vTaskDelete(busTask);
 
@@ -417,18 +412,26 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
 
         return false;
     }
+    ESP_LOGD(TAG, "ISR ringbuffer created");
+
+    if(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3) || gpio_isr_handler_add(pin, BusISR, pin)){
+        ESP_LOGE(TAG, "could not register gpio ISR");
+
+        vTaskDelete(busTask);
+
+        vQueueDelete(RXmessageQueue);
+        vQueueDelete(TXmessageQueue);
+
+        vRingbufferDelete(isrBuf);
+
+        return false;
+    }
     ESP_LOGD(TAG, "Installed ISR handler");
 
     return true;
 }
 
-DCP_Data_t* CreateMessage(const struct DCP_Message_t* message){
-
-    return NULL;
-}
-
 bool SendMessage(const DCP_Data_t message){
-
 
 #ifdef ESP_LOGD
     if (message.message->type){
