@@ -1,16 +1,16 @@
 #include "DCP.h"
-#include "esp_cpu.h"
-#include "freertos/ringbuf.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/portmacro.h>
 #include <freertos/queue.h>
+#include "freertos/ringbuf.h"
 
 #include <driver/gpio.h>
 #include <esp_private/esp_clk.h>
 #include <esp_log.h>
 #include <rom/ets_sys.h>
+#include "esp_cpu.h"
 
 #include <assert.h>
 #include <stdbool.h>
@@ -59,7 +59,8 @@ static inline bool s_ReadBit(const gpio_num_t pin){
         continue;
 
     //reading high time
-    for (esp_cpu_set_cycle_count(0); gpio_get_level(pin) == 1;)
+    esp_cpu_set_cycle_count(0);
+    for (esp_cpu_cycle_count_t lim = configParam.limits[1] << 1; gpio_get_level(pin) == 1 && esp_cpu_get_cycle_count() < lim;)
         continue;
 
     return esp_cpu_get_cycle_count() <= configParam.limits[1]? 0: 1;
@@ -219,7 +220,7 @@ void _Noreturn busHandler(void* arg){
 
     while(1){
 
-        gpio_set_level(2, 1);
+        gpio_set_level(2, 0);
 
         switch(state){
             case LISTENING:
@@ -324,9 +325,9 @@ void _Noreturn busHandler(void* arg){
                 break;
             case READING:
                 message.data = malloc(rbSize * sizeof(uint8_t));
-                memmove(message.data, item, rbSize);
+                memmove(message.data, rbItem, rbSize);
 
-                vRingbufferReturnItem(isrBuf, item);
+                vRingbufferReturnItem(isrBuf, rbItem);
 
                 xQueueSend(RXmessageQueue, &(message.data), pdMS_TO_TICKS(15));
 
@@ -389,23 +390,9 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     ESP_LOGV(TAG, "transmission limits: [%lu ~ %lu]ticks", configParam.limits[0], configParam.limits[1]);
     ESP_LOGV(TAG, "transmission limits: [%.2f ~ %.2f]us", configParam.delta - configParam.moe, configParam.delta + configParam.moe);
 
-    xTaskCreate(busHandler, "DCP bus handler", 2*1024, &pin, configMAX_PRIORITIES-2, &busTask);
-
-    if (!busTask){
-        ESP_LOGE(TAG, "could not create bus arbitrator task");
-
-        vQueueDelete(RXmessageQueue);
-        vQueueDelete(TXmessageQueue);
-        
-        return false;
-    }
-    ESP_LOGI(TAG, "bus arbitrator task created");
-
     isrBuf = xRingbufferCreate(0xFF0, RINGBUF_TYPE_NOSPLIT);
     if(isrBuf == NULL){
         ESP_LOGE(TAG, "could not create ISR buffer");
-
-        vTaskDelete(busTask);
 
         vQueueDelete(RXmessageQueue);
         vQueueDelete(TXmessageQueue);
@@ -414,10 +401,8 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     }
     ESP_LOGD(TAG, "ISR ringbuffer created");
 
-    if(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3) || gpio_isr_handler_add(pin, BusISR, pin)){
+    if(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3) || gpio_isr_handler_add(pin, BusISR, (void*)pin)){
         ESP_LOGE(TAG, "could not register gpio ISR");
-
-        vTaskDelete(busTask);
 
         vQueueDelete(RXmessageQueue);
         vQueueDelete(TXmessageQueue);
@@ -427,6 +412,24 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
         return false;
     }
     ESP_LOGD(TAG, "Installed ISR handler");
+
+
+    xTaskCreate(busHandler, "DCP bus handler", 2*1024, &pin, configMAX_PRIORITIES-2, &busTask);
+
+    if (!busTask){
+        ESP_LOGE(TAG, "could not create bus arbitrator task");
+
+        vQueueDelete(RXmessageQueue);
+        vQueueDelete(TXmessageQueue);
+
+        gpio_uninstall_isr_service();
+
+        vRingbufferDelete(isrBuf);
+
+        return false;
+    }
+    ESP_LOGI(TAG, "bus arbitrator task created");
+
 
     return true;
 }
