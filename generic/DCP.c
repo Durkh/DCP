@@ -2,13 +2,16 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/portmacro.h>
 #include <freertos/queue.h>
+
+//TODO change vvvvv
+#include <portmacro.h>
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
 
 extern void Log(char const * const tag, char const * const msg, ...);
 
@@ -16,13 +19,12 @@ extern void gpio_set_direction(unsigned int pin, unsigned int dir);
 extern void gpio_set_level(unsigned int pin, unsigned int level);
 extern int gpio_get_level(unsigned int pin);
 
-extern void get_clock_speed();
+extern uint32_t get_clock_speed();
 extern void reset_clock_tick();
 extern uint32_t get_clock_tick();
 
 static char* TAG = "DCP Driver";
 
-portMUX_TYPE criticalMutex = portMUX_INITIALIZER_UNLOCKED;
 volatile DCP_MODE busMode;
 
 QueueHandle_t RXmessageQueue = NULL;
@@ -31,32 +33,29 @@ QueueHandle_t isrq = NULL;
 
 TaskHandle_t busTask = NULL;
 
-static const float deltaLUT[] = {20, 4, 2.5, 1.25};
 volatile struct {
     float delta;    //transmission time unit
     float moe;      //transmission margin of error
     uint32_t limits[2];
 } configParam;
 
-static double CLOCK_TO_TIME;
-
 /*!
  * @brief generic definition of function that delays for microsseconds
  * @param ticks = delay in us * frequency in MHz
  */
-static __attribute__((always_inline)) inline void Delay(const esp_cpu_cycle_count_t ticks){
+static __attribute__((always_inline)) inline void Delay(const uint32_t ticks){
     reset_clock_tick();
 
-    taskENTER_CRITICAL(&criticalMutex);
+    taskENTER_CRITICAL();
 
     //TODO overflow is assumed to not happen, it won't always be the case
     while (get_clock_tick() < ticks)
         asm volatile ("nop");
 
-    taskEXIT_CRITICAL(&criticalMutex);
+    taskEXIT_CRITICAL();
 }
 
-static inline bool s_ReadBit(const gpio_num_t pin){
+static inline bool s_ReadBit(const unsigned int pin){
     
     while (gpio_get_level(pin) == 0)
         continue;
@@ -69,7 +68,7 @@ static inline bool s_ReadBit(const gpio_num_t pin){
     return get_clock_tick() <= configParam.limits[1]? 0: 1;
 }
 
-static uint8_t s_ReadByte(const gpio_num_t pin){
+static uint8_t s_ReadByte(const unsigned int pin){
 
     uint8_t byte = 0;
 
@@ -80,7 +79,7 @@ static uint8_t s_ReadByte(const gpio_num_t pin){
     return byte;
 }
 
-static void BusISR(void* arg){
+void BusISR(void* arg){
 
     const uint16_t pin = (uint16_t)arg;
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -89,7 +88,7 @@ static void BusISR(void* arg){
     vTaskNotifyGiveFromISR(busTask, &xHigherPriorityTaskWoken);
 
     //reading incoming data
-    gpio_set_direction(pin, GPIO_MODE_INPUT);
+    gpio_set_direction(pin, 1);
     gpio_set_level(2, 0);
 
     //wait for SYNC to end
@@ -119,13 +118,13 @@ static void BusISR(void* arg){
         gpio_set_level(2, 0);
     }
 
-    xQueueSendFromISR(&isrq, data, &xHigherPriorityTaskWoken);
+    xQueueSendFromISR(isrq, data, &xHigherPriorityTaskWoken);
     gpio_set_level(2, 1);
 
     portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
 }
 
-static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t const data[size], unsigned const delays[restrict 3]){
+static inline bool s_SendBytes(unsigned int const pin, uint8_t const size, uint8_t const data[size], unsigned const delays[restrict 3]){
 
      for (int i = 0; i < size; ++i){
         for (int j = 7; j >= 0; --j){
@@ -174,7 +173,7 @@ static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t
  */
 void _Noreturn busHandler(void* arg){
 
-    const gpio_num_t pin = *((gpio_num_t*)arg);
+    const unsigned int pin = (unsigned int)arg;
     enum {STARTING, LISTENING, SENDING, WAITING, READING, END_} state = WAITING;
 
     //precalculations
@@ -252,25 +251,25 @@ void _Noreturn busHandler(void* arg){
             case STARTING:
                 //starting communication
                 if(gpio_get_level(pin) == 0){
-                    taskEXIT_CRITICAL(&criticalMutex);
+                    taskEXIT_CRITICAL();
                     state = WAITING;
                     continue;
                 }
 
                 //sync signal
-                gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+                gpio_set_direction(pin, 0);
 
                 Delay(delays[1]);
 
                 //bit sync signal
                 //high part
                 gpio_set_level(2, 1);
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
+                gpio_set_direction(pin, 1);
                 Delay((uint32_t)(8 * delays[2]));
 
                 //bit sync signal
                 //low part
-                gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+                gpio_set_direction(pin, 0);
                 gpio_set_level(pin, 0);
                 Delay((uint32_t)(8 * delays[2]));
 
@@ -289,21 +288,21 @@ void _Noreturn busHandler(void* arg){
                                         message.data,
                                         (unsigned[3]){delays[2], delays[3], 150});
 
-                taskEXIT_CRITICAL(&criticalMutex);
+                taskEXIT_CRITICAL();
 
                 gpio_set_level(2, 0);
                 if (collision){
-                    ESP_LOGV(TAG, "Collision detected");
+                    Log(TAG, "Collision detected");
                     state = LISTENING;
                     continue;
                 }
 
                 free(message.data);
 
-                ESP_LOGV(TAG, "successfully sent message, going to wait mode");
+                Log(TAG, "successfully sent message, going to wait mode");
 
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
+                gpio_set_direction(pin, 1);
 
                 __attribute__((fallthrough));
             case WAITING:

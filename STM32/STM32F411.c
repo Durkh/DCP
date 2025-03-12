@@ -1,21 +1,47 @@
 #include "DCP.h"
 
+#include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_rcc.h"
 
 #include "stm32f4xx_hal_tim.h"
 #include "stm32f4xx_ll_tim.h"
 
-#include "stm32f4xx_hal_gpio.h";
-#include "stm32f4xx_ll_gpio.h";
+#include "stm32f4xx_hal_gpio.h"
+#include "stm32f4xx_ll_gpio.h"
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
 
 #include <stdarg.h>
 #include <stdio.h>
 
 #define GPIO_BANK GPIOB
 
+static char* TAG = "DCP port";
 TIM_HandleTypeDef* tmr;
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+extern DCP_MODE busMode;
+
+extern QueueHandle_t RXmessageQueue;
+extern QueueHandle_t TXmessageQueue;
+extern QueueHandle_t isrq;
+
+extern TaskHandle_t busTask;
+
+static const float deltaLUT[] = {20, 4, 2.5, 1.25};
+extern struct {
+    float delta;    //transmission time unit
+    float moe;      //transmission margin of error
+    uint32_t limits[2];
+} configParam;
+
 extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+_Noreturn extern void busHandler(void* arg);
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void Log(char const * const tag, char const * const msg, ...){
     (void)tag;
@@ -39,22 +65,22 @@ void Log(char const * const tag, char const * const msg, ...){
         end = 512;
     }
 
-    CDC_Transmit_FS(msg, end);
+    CDC_Transmit_FS((uint8_t*)buffer, end);
 }
 
-void inline gpio_set_direction(unsigned int pin, unsigned int dir){
+void gpio_set_direction(unsigned int pin, unsigned int dir){
     LL_GPIO_SetPinMode(GPIO_BANK, pin, dir == 0? LL_GPIO_MODE_OUTPUT: LL_GPIO_MODE_INPUT);
 }
 
-void inline gpio_set_level(unsigned int pin, unsigned int level){
+void gpio_set_level(unsigned int pin, unsigned int level){
     HAL_GPIO_WritePin(GPIO_BANK, pin, level);
 }
 
-int inline gpio_get_level(unsigned int pin){
+int gpio_get_level(unsigned int pin){
     return HAL_GPIO_ReadPin(GPIO_BANK, pin);
 }
 
-uint32_t inline get_clock_speed(){
+uint32_t get_clock_speed(){
     return HAL_RCC_GetSysClockFreq();
 }
 
@@ -63,7 +89,7 @@ void reset_clock_tick(){
 }
 
 uint32_t get_clock_tick(){
-    return LL_TIM_GetCounter(&tmr);
+    return LL_TIM_GetCounter(tmr->Instance);
 }
 
 extern DCP_MODE busMode;
@@ -84,9 +110,7 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
 
     gpio_set_direction(2, 0);
 
-    CLOCK_TO_TIME = 1.0/get_clock_speed();
-
-     GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     /* GPIO Ports Clock Enable */
     __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -123,8 +147,8 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     configParam.delta = deltaLUT[busMode.speed];
     configParam.moe = .02*configParam.delta;
 
-    configParam.limits[0] = ((configParam.delta - configParam.moe)*1e-6)/CLOCK_TO_TIME;
-    configParam.limits[1] = ((configParam.delta + configParam.moe)*1e-6)/CLOCK_TO_TIME;
+    configParam.limits[0] = ((configParam.delta - configParam.moe)*1e-6)*get_clock_speed();
+    configParam.limits[1] = ((configParam.delta + configParam.moe)*1e-6)*get_clock_speed();
 
     Log(TAG, "transmission limits: [%lu ~ %lu]ticks", configParam.limits[0], configParam.limits[1]);
     Log(TAG, "transmission limits: [%.2f ~ %.2f]us", configParam.delta - configParam.moe, configParam.delta + configParam.moe);
@@ -140,18 +164,18 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     }
     Log(TAG, "ISR queue created");
 
-    HAL_NVIC_SetPriority(EXT0_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(EXT0_IRQn);
+    HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
-    xTaskCreate(busHandler, "DCP bus handler", 2*1024, &pin, configMAX_PRIORITIES-2, &busTask);
+    xTaskCreate(busHandler, "DCP bus handler", 2*1024, (void*)busPin, configMAX_PRIORITIES-2, &busTask);
 
     if (!busTask){
-        ESP_LOGE(TAG, "could not create bus arbitrator task");
+        Log(TAG, "could not create bus arbitrator task");
 
         vQueueDelete(RXmessageQueue);
         vQueueDelete(TXmessageQueue);
 
-        gpio_uninstall_isr_service();
+        HAL_NVIC_DisableIRQ(EXTI0_IRQn);
 
         vQueueDelete(isrq);
 
@@ -162,9 +186,11 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     return true;
 }
 
-extern void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+extern void BusISR(void* arg);
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
     if(GPIO_Pin == GPIO_PIN_13) {
-        BusISR(GPIO_Pin);
+        BusISR((void*)GPIO_Pin);
     } else {
       __NOP();
     }
