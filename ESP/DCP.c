@@ -85,6 +85,7 @@ static void BusISR(void* arg){
     vTaskNotifyGiveFromISR(busTask, &xHigherPriorityTaskWoken);
 
     //reading incoming data
+    gpio_set_direction(pin, GPIO_MODE_INPUT);
     gpio_set_level(2, 0);
 
     //wait for SYNC to end
@@ -128,7 +129,7 @@ static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t
             // if bit == 0: 1 delta high, 1 delta low
             // else: 2 delta high, 1 delta low
 
-
+            gpio_set_direction(pin, GPIO_MODE_INPUT);
 
             if (((data[i] >> j) & 0x1) == 0){
                 Delay(delays[0]);
@@ -145,11 +146,11 @@ static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t
             }
 
             //low side of the bit
-
+            gpio_set_direction(pin, GPIO_MODE_OUTPUT);
             gpio_set_level(pin, 0);
 
             Delay(delays[1] + delays[2]);
-
+            gpio_set_direction(pin, GPIO_MODE_INPUT);
 
             //collision
             if(gpio_get_level(pin) == 0){
@@ -215,7 +216,7 @@ void _Noreturn busHandler(void* arg){
     assert(RXmessageQueue != NULL);
     assert(TXmessageQueue != NULL);
 
-
+    gpio_set_direction(pin, GPIO_MODE_INPUT);
 
     while(1){
 
@@ -255,18 +256,20 @@ void _Noreturn busHandler(void* arg){
 
                 //sync signal
                 gpio_set_level(2, 0);
-
+                gpio_set_direction(pin, GPIO_MODE_OUTPUT);
                 gpio_set_level(pin, 0);
+
                 Delay(delays[1]);
 
                 //bit sync signal
                 //high part
-
+                gpio_set_direction(pin, GPIO_MODE_INPUT);
                 Delay((uint32_t)(8 * delays[2]));
 
                 //bit sync signal
                 //low part
-
+                gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+                gpio_set_level(pin, 0);
                 Delay((uint32_t)(8 * delays[2]));
 
                 gpio_set_level(2, 1);
@@ -280,6 +283,7 @@ void _Noreturn busHandler(void* arg){
                 taskENTER_CRITICAL(&criticalMutex);
                 gpio_set_level(2, 0);
 
+                gpio_set_direction(pin, GPIO_MODE_INPUT);
                 collision = s_SendBytes(pin,
                                         message.message->type? message.message->type: sizeof(struct DCP_Message_t),
                                         message.data,
@@ -299,6 +303,7 @@ void _Noreturn busHandler(void* arg){
                 ESP_LOGV(TAG, "successfully sent message, going to wait mode");
 
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
+                gpio_set_direction(pin, GPIO_MODE_INPUT);
 
                 __attribute__((fallthrough));
             case WAITING:
@@ -351,8 +356,7 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
 
     gpio_config_t conf = {
         .pin_bit_mask = 1<<pin,
-        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
-        .pull_up_en = true,
+        .mode = GPIO_MODE_INPUT,
         .intr_type = GPIO_INTR_NEGEDGE
     };
     
