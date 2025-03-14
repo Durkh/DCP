@@ -226,11 +226,12 @@ void _Noreturn busHandler(void* arg){
             case LISTENING:
                 //listening bus for CSMA
                 if(gpio_get_level(pin) == 0){
+                    taskEXIT_CRITICAL(&criticalMutex);
                     state = WAITING;
                     continue;
                 }
 
-                ESP_LOGV(TAG, "delaying");
+                //ESP_LOGV(TAG, "delaying");
 
                 gpio_set_level(2, 0);
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
@@ -240,6 +241,7 @@ void _Noreturn busHandler(void* arg){
 
                 //while in the delay, did someone take the bus?
                 if(ulTaskNotifyTake(pdTRUE, 0)){
+                    taskEXIT_CRITICAL(&criticalMutex);
                     ESP_LOGV(TAG, "someone took the bus");
                     state = WAITING;
                     continue;
@@ -250,6 +252,7 @@ void _Noreturn busHandler(void* arg){
             case STARTING:
                 //starting communication
                 if(gpio_get_level(pin) == 0){
+                    taskEXIT_CRITICAL(&criticalMutex);
                     state = WAITING;
                     continue;
                 }
@@ -280,10 +283,8 @@ void _Noreturn busHandler(void* arg){
                 //sending data
                 assert(message.data != NULL);
 
-                taskENTER_CRITICAL(&criticalMutex);
                 gpio_set_level(2, 0);
 
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
                 collision = s_SendBytes(pin,
                                         message.message->type? message.message->type: sizeof(struct DCP_Message_t),
                                         message.data,
@@ -318,6 +319,7 @@ void _Noreturn busHandler(void* arg){
                  
                 //message to send
                 if (xQueueReceive(TXmessageQueue, &(message.data), 1) == pdPASS){
+                    taskENTER_CRITICAL(&criticalMutex);
                     state = LISTENING;
                     break;
                 }
