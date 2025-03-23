@@ -18,6 +18,7 @@
 #include <string.h>
 
 static char* TAG = "DCP Driver";
+#define DEBUG_PIN 8
 
 portMUX_TYPE criticalMutex = portMUX_INITIALIZER_UNLOCKED;
 volatile DCP_MODE busMode;
@@ -220,7 +221,9 @@ void _Noreturn busHandler(void* arg){
 
     while(1){
 
-        gpio_set_level(2, 0);
+#ifdef DEBUG_PIN
+        gpio_set_level(DEBUG_PIN, 0);
+#endif
 
         switch(state){
             case LISTENING:
@@ -233,7 +236,9 @@ void _Noreturn busHandler(void* arg){
                 ESP_LOGV(TAG, "delaying");
                 taskENTER_CRITICAL(&criticalMutex);
 
-                gpio_set_level(2, 1);
+#ifdef DEBUG_PIN
+                gpio_set_level(DEBUG_PIN, 1);
+#endif
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
                 //protocol piority delay
                 //devices with smaller addresses will have the priority
@@ -247,7 +252,9 @@ void _Noreturn busHandler(void* arg){
                     continue;
                 }
 
-                gpio_set_level(2, 0);
+#ifdef DEBUG_PIN
+                gpio_set_level(DEBUG_PIN, 0);
+#endif
                 __attribute__((fallthrough));
             case STARTING:
                 //starting communication
@@ -264,7 +271,9 @@ void _Noreturn busHandler(void* arg){
 
                 //bit sync signal
                 //high part
-                gpio_set_level(2, 1);
+#ifdef DEBUG_PIN
+                gpio_set_level(DEBUG_PIN, 1);
+#endif
                 (void)gpio_set_direction(pin, GPIO_MODE_INPUT);
                 Delay((uint32_t)(8 * delays[2]));
 
@@ -274,7 +283,9 @@ void _Noreturn busHandler(void* arg){
                 gpio_set_level(pin, 0);
                 Delay((uint32_t)(8 * delays[2]));
 
-                gpio_set_level(2, 0);
+#ifdef DEBUG_PIN
+                gpio_set_level(DEBUG_PIN, 0);
+#endif
 
                 //leaving the bus still low not to interfere in the first bit
                 __attribute__((fallthrough));
@@ -282,7 +293,9 @@ void _Noreturn busHandler(void* arg){
                 //sending data
                 assert(message.data != NULL);
 
-                gpio_set_level(2, 1);
+#ifdef DEBUG_PIN
+                gpio_set_level(DEBUG_PIN, 1);
+#endif
 
                 collision = s_SendBytes(pin,
                                         message.message->type? message.message->type: sizeof(struct DCP_Message_t),
@@ -291,7 +304,9 @@ void _Noreturn busHandler(void* arg){
 
                 taskEXIT_CRITICAL(&criticalMutex);
 
-                gpio_set_level(2, 0);
+#ifdef DEBUG_PIN
+                gpio_set_level(DEBUG_PIN, 0);
+#endif
                 if (collision){
                     ESP_LOGV(TAG, "Collision detected");
                     state = LISTENING;
@@ -349,7 +364,9 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
         return true;
     }
 
-    gpio_set_direction(2, GPIO_MODE_OUTPUT);
+#ifdef DEBUG_PIN
+    gpio_set_direction(DEBUG_PIN, GPIO_MODE_OUTPUT);
+#endif
 
     gpio_num_t pin = busPin;
     CLOCK_TO_TIME = 1.0/esp_clk_cpu_freq();
@@ -357,7 +374,8 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     gpio_config_t conf = {
         .pin_bit_mask = 1<<pin,
         .mode = GPIO_MODE_INPUT,
-        .intr_type = GPIO_INTR_NEGEDGE
+        .intr_type = GPIO_INTR_NEGEDGE,
+        .pull_up_en = true
     };
     
     if(gpio_config(&conf)) return false;
