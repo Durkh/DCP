@@ -476,7 +476,7 @@ struct DCP_Message_t* ReadMessage(){
     DCP_Data_t message = {0};
 
     if ((busMode.flags.flags & 0x1) == FLAG_Instant){
-        if (xQueueReceive(RXmessageQueue, &(message.data), portMAX_DELAY) == pdTRUE){
+        if (xQueueReceive(RXmessageQueue, &(message.data), 0) == pdTRUE){
 
 #ifdef ESP_LOGD
             if (message.message->type){

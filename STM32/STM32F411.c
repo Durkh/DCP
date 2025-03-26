@@ -19,7 +19,6 @@
 #define GPIO_BANK GPIOB
 
 static char* TAG = "DCP port";
-TIM_HandleTypeDef* tmr;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -42,6 +41,7 @@ extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 _Noreturn extern void busHandler(void* arg);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
+extern TIM_HandleTypeDef htim2;
 
 void Log(char const * const tag, char const * const msg, ...){
     (void)tag;
@@ -50,26 +50,27 @@ void Log(char const * const tag, char const * const msg, ...){
     va_list args;
 
     va_start(args, msg);
-    int end = snprintf(buffer, 512, msg, args);
+    int end = vsnprintf(buffer, 512, msg, args);
     va_end(args);
 
     //end will not point to \0, so if end == 509, the str == 510
-    if (end++ < 510){
+    if (end < 510){
         buffer[end++] = '\r';
         buffer[end++] = '\n';
         buffer[end] = '\0';
     }else{
-        buffer[510] = '\r';
-        buffer[511] = '\n';
-        buffer[512] = '\0';
-        end = 512;
+        buffer[509] = '\r';
+        buffer[510] = '\n';
+        buffer[511] = '\0';
+        end = 511;
     }
 
     CDC_Transmit_FS((uint8_t*)buffer, end);
 }
 
 void gpio_set_direction(unsigned int pin, unsigned int dir){
-    LL_GPIO_SetPinMode(GPIO_BANK, pin, dir == 0? LL_GPIO_MODE_OUTPUT: LL_GPIO_MODE_INPUT);
+    //TODO modify hardcode
+    LL_GPIO_SetPinMode(GPIO_BANK, LL_GPIO_PIN_0, dir == 0? LL_GPIO_MODE_OUTPUT: LL_GPIO_MODE_INPUT);
 }
 
 void gpio_set_level(unsigned int pin, unsigned int level){
@@ -80,18 +81,23 @@ int gpio_get_level(unsigned int pin){
     return HAL_GPIO_ReadPin(GPIO_BANK, pin);
 }
 
+void toggle_debug_pin(){
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+}
+
 uint32_t get_clock_speed(){
     return HAL_RCC_GetSysClockFreq();
 }
 
 void reset_clock_tick(){
-    HAL_TIM_Base_Init(tmr);
+    HAL_TIM_Base_Init(&htim2);
 }
 
 uint32_t get_clock_tick(){
-    return LL_TIM_GetCounter(tmr->Instance);
+    return LL_TIM_GetCounter(htim2.Instance);
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////
 extern DCP_MODE busMode;
 extern QueueHandle_t RXmessageQueue;
 extern QueueHandle_t TXmessageQueue;
@@ -99,6 +105,7 @@ extern QueueHandle_t isrq;
 
 extern TaskHandle_t busTask;
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
 
     if (mode.addr == 0) return false;
@@ -108,22 +115,17 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
         return true;
     }
 
-    gpio_set_direction(2, 0);
-
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    /* GPIO Ports Clock Enable */
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_GPIOH_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-
+    /*
     HAL_GPIO_WritePin(GPIO_BANK, busPin, GPIO_PIN_RESET);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_0;
-    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitTypeDef GPIO_InitStruct = {
+        .Pin = busPin,
+        .Mode = GPIO_MODE_IT_FALLING,
+        .Pull = GPIO_PULLUP
+    };
+
     HAL_GPIO_Init(GPIO_BANK, &GPIO_InitStruct);
+    */
 
     RXmessageQueue = xQueueCreate(8, sizeof(uint8_t*));
     if (!RXmessageQueue){
@@ -164,8 +166,7 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     }
     Log(TAG, "ISR queue created");
 
-    HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+    //HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
     xTaskCreate(busHandler, "DCP bus handler", 2*1024, (void*)busPin, configMAX_PRIORITIES-2, &busTask);
 
@@ -175,7 +176,7 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
         vQueueDelete(RXmessageQueue);
         vQueueDelete(TXmessageQueue);
 
-        HAL_NVIC_DisableIRQ(EXTI0_IRQn);
+        //HAL_NVIC_DisableIRQ(EXTI0_IRQn);
 
         vQueueDelete(isrq);
 
@@ -186,12 +187,3 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     return true;
 }
 
-extern void BusISR(void* arg);
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
-    if(GPIO_Pin == GPIO_PIN_13) {
-        BusISR((void*)GPIO_Pin);
-    } else {
-      __NOP();
-    }
-}

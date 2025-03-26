@@ -22,6 +22,7 @@ extern int gpio_get_level(unsigned int pin);
 extern uint32_t get_clock_speed();
 extern void reset_clock_tick();
 extern uint32_t get_clock_tick();
+extern void toggle_debug_pin();
 
 static char* TAG = "DCP Driver";
 
@@ -79,6 +80,7 @@ static uint8_t s_ReadByte(const unsigned int pin){
     return byte;
 }
 
+
 void BusISR(void* arg){
 
     const uint16_t pin = (uint16_t)arg;
@@ -89,12 +91,12 @@ void BusISR(void* arg){
 
     //reading incoming data
     gpio_set_direction(pin, 1);
-    gpio_set_level(2, 0);
+    toggle_debug_pin();
 
     //wait for SYNC to end
     while(gpio_get_level(pin) == 0) continue;
 
-    gpio_set_level(2, 1);
+    toggle_debug_pin();
     for (reset_clock_tick(); gpio_get_level(pin) == 1; ){
         if(get_clock_tick() > 10*configParam.limits[1]){
             portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
@@ -107,19 +109,18 @@ void BusISR(void* arg){
         return;
     }
 
-    gpio_set_level(2, 0);
-
+    toggle_debug_pin();
     data[0] = s_ReadByte(pin);
     const uint8_t flag = data[0]? data[0]: sizeof(struct DCP_Message_L3_t)+1;
 
     for (int i = 1; i < flag; ++i){
-        gpio_set_level(2, 1);
+        toggle_debug_pin();
         data[i] = s_ReadByte(pin);
-        gpio_set_level(2, 0);
+        toggle_debug_pin();
     }
 
     xQueueSendFromISR(isrq, data, &xHigherPriorityTaskWoken);
-    gpio_set_level(2, 1);
+    toggle_debug_pin();
 
     portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
 }
@@ -171,7 +172,7 @@ static inline bool s_SendBytes(unsigned int const pin, uint8_t const size, uint8
  *
  *
  */
-void _Noreturn busHandler(void* arg){
+_Noreturn void busHandler(void* arg){
 
     const unsigned int pin = (unsigned int)arg;
     enum {STARTING, LISTENING, SENDING, WAITING, READING, END_} state = WAITING;
@@ -209,7 +210,7 @@ void _Noreturn busHandler(void* arg){
         (2*configParam.delta-skews[busMode.speed][3])*freqMHz
     };
 
-    Log(TAG, "calculated delays:\n\tlistening: %lu cycles\n\tsync: %lu cycles\n\tbit 0: %lu cycles\n\tbit 1: %lu cycles", delays[0], delays[1], delays[2], delays[3]);
+    //Log(TAG, "calculated delays:\n\tlistening: %lu cycles\n\tsync: %lu cycles\n\tbit 0: %lu cycles\n\tbit 1: %lu cycles", delays[0], delays[1], delays[2], delays[3]);
 
     //variables
     uint8_t qItem[0xFF];
@@ -223,7 +224,7 @@ void _Noreturn busHandler(void* arg){
 
     while(1){
 
-        gpio_set_level(2, 1);
+        //toggle_debug_pin();
 
         switch(state){
             case LISTENING:
@@ -233,7 +234,7 @@ void _Noreturn busHandler(void* arg){
                     continue;
                 }
 
-                gpio_set_level(2, 0);
+                toggle_debug_pin();
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
                 //protocol piority delay
                 //devices with smaller addresses will have the priority
@@ -246,7 +247,7 @@ void _Noreturn busHandler(void* arg){
                     continue;
                 }
 
-                gpio_set_level(2, 1);
+                toggle_debug_pin();
                 __attribute__((fallthrough));
             case STARTING:
                 //starting communication
@@ -263,7 +264,7 @@ void _Noreturn busHandler(void* arg){
 
                 //bit sync signal
                 //high part
-                gpio_set_level(2, 1);
+                toggle_debug_pin();
                 gpio_set_direction(pin, 1);
                 Delay((uint32_t)(8 * delays[2]));
 
@@ -273,7 +274,7 @@ void _Noreturn busHandler(void* arg){
                 gpio_set_level(pin, 0);
                 Delay((uint32_t)(8 * delays[2]));
 
-                gpio_set_level(2, 0);
+                toggle_debug_pin();
 
                 //leaving the bus still low not to interfere in the first bit
                 __attribute__((fallthrough));
@@ -281,7 +282,7 @@ void _Noreturn busHandler(void* arg){
                 //sending data
                 assert(message.data != NULL);
 
-                gpio_set_level(2, 1);
+                toggle_debug_pin();
 
                 collision = s_SendBytes(pin,
                                         message.message->type? message.message->type: sizeof(struct DCP_Message_t),
@@ -290,7 +291,7 @@ void _Noreturn busHandler(void* arg){
 
                 taskEXIT_CRITICAL();
 
-                gpio_set_level(2, 0);
+                toggle_debug_pin();
                 if (collision){
                     Log(TAG, "Collision detected");
                     state = LISTENING;
@@ -364,7 +365,7 @@ struct DCP_Message_t* ReadMessage(){
     DCP_Data_t message = {0};
 
     if ((busMode.flags.flags & 0x1) == FLAG_Instant){
-        if (xQueueReceive(RXmessageQueue, &(message.data), portMAX_DELAY) == pdTRUE){
+        if (xQueueReceive(RXmessageQueue, &(message.data), 0) == pdTRUE){
 
             return message.message;
         }
