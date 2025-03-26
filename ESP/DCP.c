@@ -229,6 +229,7 @@ void _Noreturn busHandler(void* arg){
             case LISTENING:
                 //listening bus for CSMA
                 if(gpio_get_level(pin) == 0){
+                    taskEXIT_CRITICAL(&criticalMutex);
                     state = WAITING;
                     continue;
                 }
@@ -294,7 +295,7 @@ void _Noreturn busHandler(void* arg){
                 assert(message.data != NULL);
 
 #ifdef DEBUG_PIN
-                gpio_set_level(DEBUG_PIN, 1);
+                gpio_set_level(DEBUG_PIN, 0);
 #endif
 
                 collision = s_SendBytes(pin,
@@ -333,6 +334,7 @@ void _Noreturn busHandler(void* arg){
                  
                 //message to send
                 if (xQueueReceive(TXmessageQueue, &(message.data), 1) == pdPASS){
+                    taskENTER_CRITICAL(&criticalMutex);
                     state = LISTENING;
                     break;
                 }
