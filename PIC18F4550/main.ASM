@@ -8,6 +8,7 @@
 	CONFIG	BOR = OFF
 	CONFIG	WDT = OFF
 	CONFIG	XINST = OFF
+	CONFIG  LVP = ON
 
 ; VARIABLES
 	
@@ -25,8 +26,10 @@
 	DELAY_L		equ 	TMR3L
 	
 	BUS_ADDR 	equ	0x2
-	BUS_PIN  	equ 	RA0
+	BUS_PIN  	equ 	RA1
 	BUS_DEVICE_TYPE equ	device_slave
+
+	DEBUG_PIN  	equ 	RA2
 
 	;;CHANGE BUS SPEED HERE vvvvvvvvvv
 	BUS_SPEED 	equ	SPEED_SLOW
@@ -42,7 +45,7 @@
 
 	DELTA_DELAY_H	equ 0xff - 0x3
 	DELTA_DELAY_L	equ 0xff - 0xc0
-	#DEFINE TIMER_CHECK 	BTFSS	TMR3H, 1, ACCESS
+	#DEFINE TIMER_CHECK 	BTFSS	TMR3H, 2, ACCESS
 
 	CBLOCK	0x00	
 					
@@ -130,7 +133,7 @@ SAI_INT
 read_bit: 
 
 	RML0:	;wait for high signal
-		BTFSS	PORTA, RA0, ACCESS
+		BTFSS	PORTA, BUS_PIN, ACCESS
 	BRA	RML0
 
 	;set timer
@@ -140,28 +143,21 @@ read_bit:
 	CLRF	TMR3L, ACCESS		
 
 	RML1:	;high time wait
-		BTFSC	PORTA, RA0, ACCESS
+		BTFSC	PORTA, BUS_PIN, ACCESS
 	BRA	RML1
 
 	BCF	T3CON, TMR3ON
+	MOVF	TMR3L, W
 
 	TIMER_CHECK
 
-	;;TODO check this
-	BTFSS	TMR3H, 2, ACCESS
-
-	BRA 	RB_BIT0
+	BRA 	RB_BIT0	;if the time was less than delta, then it's zero
 
 	BSF	STATUS, C, ACCESS	;bit is 1
-	BRA 	RB_END
+	RETURN
 
 	RB_BIT0:
 	BCF	STATUS, C, ACCESS 	;bit is 0
-
-	RB_END:
-	RML2:	;low time wait
-	BTFSS	PORTA, RA0, ACCESS
-	BRA	RML2
 
 	RETURN
 
@@ -170,28 +166,30 @@ read_bit:
 read_byte macro dest
 
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
 	
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
 	
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
 	
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
 	
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
 	
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
 	
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
 	
 	CALL	read_bit
-	RRCF	dest, 1, BANKED
+	RLCF	J, F, ACCESS
+	
+	MOVFF	J, dest
 
 endm
 
@@ -205,7 +203,7 @@ send_data:
 		L2: ;;this loops through the bits
 
 			;;we set the bus on high by releasing it
-			BSF	TRISA, RA0, ACCESS
+			BSF	TRISA, BUS_PIN, ACCESS
 
 			MOVLW	DELTA_DELAY_H
 			MOVWF 	TMR3H	
@@ -229,14 +227,14 @@ send_data:
 			BTFSC 	COLLISION, ACCESS
 			GOTO 	WAITING
 
-			BCF	TRISA, RA0, ACCESS	;setting the bus low
+			BCF	TRISA, BUS_PIN, ACCESS	;setting the bus low
 			MOVLW	DELTA_DELAY_H
 			MOVWF 	TMR3H	
 			MOVLW	DELTA_DELAY_L
 			MOVWF 	TMR3L
 			CALL delay	
 
-			BSF	TRISA, RA0, ACCESS	;releasing the bus again
+			BSF	TRISA, BUS_PIN, ACCESS	;releasing the bus again
 			;;collision check
 			CALL 	check_bus, FAST
 			BTFSC 	COLLISION, ACCESS
@@ -301,9 +299,10 @@ toggle_int:
 INICIO
 
 	MOVLW	B'00000111'
-	MOVWF	CMCON		
-	CLRF	ADCON1, ACCESS
-	MOVLW	B'01111101'
+	MOVWF	CMCON
+	MOVLW	0x0F
+	MOVWF	ADCON1, ACCESS
+	MOVLW	B'01111011'
 	MOVWF	TRISA, ACCESS		
 	BSF	T3CON, RD16, ACCESS		
 
@@ -321,7 +320,7 @@ MAIN
 
 LISTENING:	;CSMA
 
-		BCF	LATA, 1, ACCESS ;;debug
+		BCF	LATA, DEBUG_PIN, ACCESS ;;debug
     
 		CLRF	J, ACCESS
 
@@ -341,7 +340,7 @@ LISTENING:	;CSMA
 		BTFSS 	J, ACCESS	;using J as interrupt flag
 		BRA 	LL1
 		
-		BSF	LATA, 1, ACCESS ;;debug
+		BSF	LATA, DEBUG_PIN, ACCESS ;;debug
 	STARTING:
 
 		BCF	TRISA, BUS_PIN, ACCESS
@@ -351,9 +350,8 @@ LISTENING:	;CSMA
 		MOVLW	SYNC_DELAY_L
 		MOVWF 	TMR3L
 		
-		BCF	LATA, 1, ACCESS ;;debug
+		BCF	LATA, DEBUG_PIN, ACCESS ;;debug
 		CALL 	delay
-
 		
 		;sync bit signal
 		BSF	TRISA, BUS_PIN, ACCESS
@@ -364,8 +362,7 @@ LISTENING:	;CSMA
 		MOVWF 	TMR3L	
 		CALL 	delay
 
-		BSF	LATA, 1, ACCESS	;;debug 
-		
+		BSF	LATA, DEBUG_PIN, ACCESS	;;debug 
 		BCF	TRISA, BUS_PIN, ACCESS
 
 		MOVLW	START_DELAY_H
@@ -416,7 +413,7 @@ LISTENING:	;CSMA
 p_init:		BCF	COLLISION, ACCESS
 
 		WL1:
-			BTFSC	PORTA, BUS_PIN, ACCESS
+			BTFSS	PORTA, BUS_PIN, ACCESS
 			GOTO 	READING
 		BRA 	WL1
 
@@ -437,7 +434,7 @@ p_init:		BCF	COLLISION, ACCESS
 		CALL 	toggle_int	;disabling interruptions as to not mess with the timings
 		BSF	TRISA, BUS_PIN, ACCESS	;set as input
 		
-		BCF	LATA, 1, ACCESS ;;debug
+		BCF	LATA, DEBUG_PIN, ACCESS ;;debug
 
 		;;BSF	T3CON, TMR3ON, ACCESS
 		
@@ -448,25 +445,25 @@ p_init:		BCF	COLLISION, ACCESS
 		BTFSS	PORTA, BUS_PIN, ACCESS
 		BRA 	sync_read_loop
 		
-		BSF	LATA, 1, ACCESS ;;debug
+		BSF	LATA, DEBUG_PIN, ACCESS ;;debug
 
 		sync_read_high:	; wait for sync 
-		BTFSS	PORTA, BUS_PIN, ACCESS
+		BTFSC	PORTA, BUS_PIN, ACCESS
 		BRA 	sync_read_high
 
 		;;TODO check loop ^^^^
-		BCF	LATA, 1, ACCESS ;;debug
+		BCF	LATA, DEBUG_PIN, ACCESS ;;debug
 		
 		;;reading flag
 		RL1:
 			CALL	read_bit
-			RRCF	RX_DCP_TYPE, 0, ACCESS
+			RLCF	RX_DCP_TYPE, 1, BANKED
 
-		DECFSZ	I, ACCESS
+		DECFSZ	I, F, ACCESS
 		BRA 	RL1
 
-		DECFSZ	RX_DCP_TYPE, 0 ; if the flag is not 1, goto GENERIC
-		BRA 	GENERIC
+		DECF	RX_DCP_TYPE, W, BANKED ; if the flag is not 0, goto GENERIC
+		BNN 	GENERIC
 
 
 		RLL3:	;L3 reading loop
@@ -474,12 +471,12 @@ p_init:		BCF	COLLISION, ACCESS
 			MOVLW 	12
 			MOVWF	I, ACCESS
 
-			LFSR 	FSR2, 0x203	;address of DCP_DATA
+			LFSR 	FSR2, 0x303	;address of DCP_DATA
 
 			RL_L3_L1:
-				BSF	LATA, 1, ACCESS ;;debug
+				BSF	LATA, DEBUG_PIN, ACCESS ;;debug
 				read_byte 	POSTINC2	;we are reading into the L3 structure sequentially
-				BCF	LATA, 1, ACCESS ;;debug
+				BCF	LATA, DEBUG_PIN, ACCESS ;;debug
 
 			DECFSZ	I, ACCESS
 			BRA 	RL_L3_L1
@@ -491,20 +488,19 @@ p_init:		BCF	COLLISION, ACCESS
 			;;reading ADDR
 			read_byte 	RX_DCP_ADDR
 			
-			MOVF	RX_DCP_TYPE, W, BANKED
-			SUBLW	3
+			MOVLW	2
+			SUBWF	RX_DCP_TYPE, W, BANKED
 			MOVWF	I, ACCESS
 
-			LFSR 	FSR2, 0x203	;address of DCP_DATA
+			LFSR 	FSR2, 0x302	;address of DCP_DATA
 			
 			RL2:
-				BSF	LATA, 1, ACCESS ;;debug
+				BSF	LATA, DEBUG_PIN, ACCESS ;;debug
 				read_byte 	POSTINC2	;here, we read a byte into the data array and increment the pointer
-				BCF	LATA, 1, ACCESS ;;debug
+				BCF	LATA, DEBUG_PIN, ACCESS ;;debug
 
 			DECFSZ	I, ACCESS
 			BRA 	RL1
 
-			CALL 	toggle_int
 	GOTO WAITING
 END
