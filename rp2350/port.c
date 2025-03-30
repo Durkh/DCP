@@ -102,8 +102,7 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
     gpio_set_dir(busPin, GPIO_IN);
 
     gpio_init(25);
-    gpio_set_dir(busPin, GPIO_OUT);
-    gpio_put(25, 1);
+    gpio_set_dir(25, GPIO_OUT);
 
     tmr = timer_get_instance(1);
     assert(tmr != NULL);
