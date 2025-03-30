@@ -29,6 +29,8 @@ _Noreturn extern void busHandler(void* arg);
 extern void BusISR(void* arg);
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+static volatile timer_hw_t* tmr = NULL;
+
 void Log(char const * const tag, char const * const msg, ...){
     va_list args;
 
@@ -61,13 +63,12 @@ uint32_t get_clock_speed(){
 }
 
 void reset_clock_tick(){
-    // No need to initialize timer in Pico, it runs continuously
-    // We can reset our reference point by getting the current time
-    timer_hw->timelr; // Read to clear
+    tmr->timelw = 0x0;
+    tmr->timehw = 0x0;
 }
 
 uint32_t get_clock_tick(){
-    return timer_hw->timerawl;
+    return tmr->timelr;
 }
 
 static void GPIO_callback(unsigned gpio, uint32_t event){
@@ -98,9 +99,16 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
 
     // Initialize GPIO
     gpio_init(busPin);
-    gpio_set_dir(busPin, GPIO_OUT);
-    gpio_put(busPin, 0);
+    gpio_set_dir(busPin, GPIO_IN);
 
+    gpio_init(25);
+    gpio_set_dir(busPin, GPIO_OUT);
+    gpio_put(25, 1);
+
+    tmr = timer_get_instance(1);
+    assert(tmr != NULL);
+    tmr->source = 0x1; //clk_sys
+    tmr->pause = 0x0; //unpause
 
     RXmessageQueue = xQueueCreate(8, sizeof(uint8_t*));
     if (!RXmessageQueue){
