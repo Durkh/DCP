@@ -33,7 +33,7 @@ struct DCP_Message_L3_t{
     uint8_t COD;        //instruction code
     uint8_t data[6];    //data
     uint8_t PAD;        //padding
-    uint8_t CRC;        //CRC
+    uint8_t CRC_;        //CRC
 };
 
 struct DCP_Message_Generic_t{

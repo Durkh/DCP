@@ -4,18 +4,15 @@ if(ESP_PLATFORM)
                             PRIV_REQUIRES "esp_ringbuf" "driver")
 
 else()
-    cmake_minimum_required(VERSION 3.24)
-    project(DCP LANGUAGES C)
+    add_library(DCP STATIC)
 
-    # Add the DCP library
-    if (ESP32)
-        add_library(DCP STATIC ESP/DCP.c)
-    elseif(RPICO2)
-        add_library(DCP STATIC RPICO2/DCP.c)
-    endif()
-
-    # Specify the include directory for the library
-    target_include_directories(DCP PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    target_sources(DCP PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/../DCP/generic/DCP.c
     )
+
+    target_include_directories(DCP PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(DCP PRIVATE FreeRTOS-Kernel)
 endif()

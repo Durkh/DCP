@@ -1,80 +1,75 @@
 #include "DCP.h"
-#include "esp_cpu.h"
-#include "hal/gpio_types.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/portmacro.h>
 #include <freertos/queue.h>
 
-#include <driver/gpio.h>
-#include <esp_private/esp_clk.h>
-#include <esp_log.h>
-#include <rom/ets_sys.h>
+//TODO change vvvvv
+#include <portmacro.h>
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
+
+extern void Log(char const * const tag, char const * const msg, ...);
+
+extern void gpio_set_direction(unsigned int pin, unsigned int dir);
+extern void gpio_set_level(unsigned int pin, unsigned int level);
+extern int gpio_get_level(unsigned int pin);
+
+extern uint32_t get_clock_speed();
+extern void reset_clock_tick();
+extern uint32_t get_clock_tick();
+extern void toggle_debug_pin();
 
 static char* TAG = "DCP Driver";
 
-portMUX_TYPE criticalMutex = portMUX_INITIALIZER_UNLOCKED;
 volatile DCP_MODE busMode;
 
 QueueHandle_t RXmessageQueue = NULL;
 QueueHandle_t TXmessageQueue = NULL;
+QueueHandle_t isrq = NULL;
 
 TaskHandle_t busTask = NULL;
 
-static const float deltaLUT[] = {20, 4, 2.5, 1.25};
 volatile struct {
     float delta;    //transmission time unit
     float moe;      //transmission margin of error
-    esp_cpu_cycle_count_t limits[2];
+    uint32_t limits[2];
 } configParam;
-
-static double CLOCK_TO_TIME;
 
 /*!
  * @brief generic definition of function that delays for microsseconds
  * @param ticks = delay in us * frequency in MHz
  */
-static __attribute__((always_inline)) inline void Delay(const esp_cpu_cycle_count_t ticks){
-    esp_cpu_set_cycle_count(0);
+static __attribute__((always_inline)) inline void Delay(const uint32_t ticks){
+    reset_clock_tick();
 
-    taskENTER_CRITICAL(&criticalMutex);
+    taskENTER_CRITICAL();
 
     //TODO overflow is assumed to not happen, it won't always be the case
-    while (esp_cpu_get_cycle_count() < ticks)
+    while (get_clock_tick() < ticks)
         asm volatile ("nop");
 
-    taskEXIT_CRITICAL(&criticalMutex);
+    taskEXIT_CRITICAL();
 }
 
-static void BusISR(void* arg){
-    (void)arg;
-
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    vTaskNotifyGiveFromISR(busTask, &xHigherPriorityTaskWoken);
-
-    portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
-}
-
-static inline bool s_ReadBit(const gpio_num_t pin){
+static inline bool s_ReadBit(const unsigned int pin){
     
     while (gpio_get_level(pin) == 0)
         continue;
 
     //reading high time
-    for (esp_cpu_set_cycle_count(0); gpio_get_level(pin) == 1;)
+    reset_clock_tick();
+    for (uint32_t lim = configParam.limits[1] << 1; gpio_get_level(pin) == 1 && get_clock_tick() < lim;)
         continue;
 
-    return esp_cpu_get_cycle_count() <= configParam.limits[1]? 0: 1;
+    return get_clock_tick() <= configParam.limits[1]? 0: 1;
 }
 
-static uint8_t s_ReadByte(const gpio_num_t pin){
+static uint8_t s_ReadByte(const unsigned int pin){
 
     uint8_t byte = 0;
 
@@ -85,7 +80,52 @@ static uint8_t s_ReadByte(const gpio_num_t pin){
     return byte;
 }
 
-static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t const data[size], unsigned const delays[restrict 3]){
+
+void BusISR(void* arg){
+
+    const uint16_t pin = (uint16_t)arg;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    static uint8_t data[0xFF];
+
+    vTaskNotifyGiveFromISR(busTask, &xHigherPriorityTaskWoken);
+
+    //reading incoming data
+    gpio_set_direction(pin, 1);
+    toggle_debug_pin();
+
+    //wait for SYNC to end
+    while(gpio_get_level(pin) == 0) continue;
+
+    toggle_debug_pin();
+    for (reset_clock_tick(); gpio_get_level(pin) == 1; ){
+        if(get_clock_tick() > 10*configParam.limits[1]){
+            portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+            return;
+        }
+    }
+
+    if(get_clock_tick() <= 6*configParam.limits[0]){
+        portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+        return;
+    }
+
+    toggle_debug_pin();
+    data[0] = s_ReadByte(pin);
+    const uint8_t flag = data[0]? data[0]: sizeof(struct DCP_Message_L3_t)+1;
+
+    for (int i = 1; i < flag; ++i){
+        toggle_debug_pin();
+        data[i] = s_ReadByte(pin);
+        toggle_debug_pin();
+    }
+
+    xQueueSendFromISR(isrq, data, &xHigherPriorityTaskWoken);
+    toggle_debug_pin();
+
+    portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+}
+
+static inline bool s_SendBytes(unsigned int const pin, uint8_t const size, uint8_t const data[size], unsigned const delays[restrict 3]){
 
      for (int i = 0; i < size; ++i){
         for (int j = 7; j >= 0; --j){
@@ -93,7 +133,7 @@ static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t
             // if bit == 0: 1 delta high, 1 delta low
             // else: 2 delta high, 1 delta low
 
-            gpio_set_direction(pin, GPIO_MODE_INPUT);
+            gpio_set_direction(pin, 1);
 
             if (((data[i] >> j) & 0x1) == 0){
                 Delay(delays[0]);
@@ -110,11 +150,11 @@ static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t
             }
 
             //low side of the bit
-            gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+            gpio_set_direction(pin, 0);
             gpio_set_level(pin, 0);
 
             Delay(delays[1] + delays[2]);
-            gpio_set_direction(pin, GPIO_MODE_INPUT);
+            gpio_set_direction(pin, 1);
 
             //collision
             if(gpio_get_level(pin) == 0){
@@ -132,13 +172,13 @@ static inline bool s_SendBytes(gpio_num_t const pin, uint8_t const size, uint8_t
  *
  *
  */
-void _Noreturn busHandler(void* arg){
+_Noreturn void busHandler(void* arg){
 
-    const gpio_num_t pin = *((gpio_num_t*)arg);
+    const unsigned int pin = (unsigned int)arg;
     enum {STARTING, LISTENING, SENDING, WAITING, READING, END_} state = WAITING;
 
     //precalculations
-    const uint32_t freqMHz = esp_clk_cpu_freq()/1e6;
+    const uint32_t freqMHz = get_clock_speed()/1e6;
 
     //TODO change this BS
 #ifdef CONFIG_IDF_TARGET_ESP32C3
@@ -170,21 +210,21 @@ void _Noreturn busHandler(void* arg){
         (2*configParam.delta-skews[busMode.speed][3])*freqMHz
     };
 
-    ESP_LOGV(TAG, "calculated delays:\n\tlistening: %lu cycles\n\tsync: %lu cycles\n\tbit 0: %lu cycles\n\tbit 1: %lu cycles", delays[0], delays[1], delays[2], delays[3]);
+    //Log(TAG, "calculated delays:\n\tlistening: %lu cycles\n\tsync: %lu cycles\n\tbit 0: %lu cycles\n\tbit 1: %lu cycles", delays[0], delays[1], delays[2], delays[3]);
 
     //variables
-    DCP_Data_t message = {.data = malloc(255 * sizeof(uint8_t))};
-    DCP_Data_t buffer = {0};
+    uint8_t qItem[0xFF];
+    DCP_Data_t message = {0};
     bool collision = false;
 
     assert(RXmessageQueue != NULL);
     assert(TXmessageQueue != NULL);
 
-    gpio_set_direction(pin, GPIO_MODE_INPUT);
+    gpio_set_direction(pin, 1);
 
     while(1){
 
-        gpio_set_level(2, 1);
+        //toggle_debug_pin();
 
         switch(state){
             case LISTENING:
@@ -194,9 +234,7 @@ void _Noreturn busHandler(void* arg){
                     continue;
                 }
 
-                ESP_LOGV(TAG, "delaying");
-
-                gpio_set_level(2, 0);
+                toggle_debug_pin();
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
                 //protocol piority delay
                 //devices with smaller addresses will have the priority
@@ -204,35 +242,39 @@ void _Noreturn busHandler(void* arg){
 
                 //while in the delay, did someone take the bus?
                 if(ulTaskNotifyTake(pdTRUE, 0)){
-                    ESP_LOGV(TAG, "someone took the bus");
+                    Log(TAG, "someone took the bus");
                     state = WAITING;
                     continue;
                 }
 
-                gpio_set_level(2, 1);
+                toggle_debug_pin();
                 __attribute__((fallthrough));
             case STARTING:
                 //starting communication
                 if(gpio_get_level(pin) == 0){
+                    taskEXIT_CRITICAL();
                     state = WAITING;
                     continue;
                 }
 
-                gpio_set_level(2, 0);
-                gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-                gpio_set_level(pin, 0);
+                //sync signal
+                gpio_set_direction(pin, 0);
 
                 Delay(delays[1]);
 
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
-
+                //bit sync signal
+                //high part
+                toggle_debug_pin();
+                gpio_set_direction(pin, 1);
                 Delay((uint32_t)(8 * delays[2]));
 
-                gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+                //bit sync signal
+                //low part
+                gpio_set_direction(pin, 0);
                 gpio_set_level(pin, 0);
-
                 Delay((uint32_t)(8 * delays[2]));
-                gpio_set_level(2, 1);
+
+                toggle_debug_pin();
 
                 //leaving the bus still low not to interfere in the first bit
                 __attribute__((fallthrough));
@@ -240,30 +282,28 @@ void _Noreturn busHandler(void* arg){
                 //sending data
                 assert(message.data != NULL);
 
-                taskENTER_CRITICAL(&criticalMutex);
-                gpio_set_level(2, 0);
+                toggle_debug_pin();
 
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
                 collision = s_SendBytes(pin,
                                         message.message->type? message.message->type: sizeof(struct DCP_Message_t),
                                         message.data,
                                         (unsigned[3]){delays[2], delays[3], 150});
 
-                taskEXIT_CRITICAL(&criticalMutex);
+                taskEXIT_CRITICAL();
 
+                toggle_debug_pin();
                 if (collision){
-                    ESP_LOGV(TAG, "Collision detected");
+                    Log(TAG, "Collision detected");
                     state = LISTENING;
                     continue;
                 }
 
-                gpio_set_level(2, 1);
                 free(message.data);
 
-                ESP_LOGV(TAG, "successfully sent message, going to wait mode");
+                Log(TAG, "successfully sent message, going to wait mode");
 
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
+                gpio_set_direction(pin, 1);
 
                 __attribute__((fallthrough));
             case WAITING:
@@ -271,176 +311,49 @@ void _Noreturn busHandler(void* arg){
                 state = WAITING;
 
                 //message to read
-                if(gpio_get_level(pin) == 0){
-                    taskENTER_CRITICAL(&criticalMutex);
+                if(uxQueueMessagesWaiting(isrq)){
                     state = READING;
                     break;
                 }
                  
                 //message to send
-                if (xQueueReceive(TXmessageQueue, &(message.data), 0) == pdPASS){
+                if (xQueueReceive(TXmessageQueue, &(message.data), 1) == pdPASS){
                     state = LISTENING;
                     break;
                 }
 
                 break;
             case READING:
-                //reading incoming data
-                gpio_set_direction(pin, GPIO_MODE_INPUT);
-                gpio_set_level(2, 0);
 
-                //wait for SYNC to end
-                while(gpio_get_level(pin) == 0) continue;
+                xQueueReceive(isrq, &qItem, pdMS_TO_TICKS(5));
 
-                gpio_set_level(2, 1);
-                for (esp_cpu_set_cycle_count(0); gpio_get_level(pin) == 1; ){
-                    if(esp_cpu_get_cycle_count() > 10*configParam.limits[1]){
-                        taskEXIT_CRITICAL(&criticalMutex);
-                        state = WAITING;
-                        break;
-                    }
-                }
+                message.data = malloc(qItem[0]? qItem[0]: sizeof(struct DCP_Message_t) * sizeof(uint8_t));
+                memmove(message.data, qItem, qItem[0]? qItem[0]: sizeof(struct DCP_Message_t));
 
-                esp_cpu_cycle_count_t c = esp_cpu_get_cycle_count();
-                if (state == WAITING) break;
+                xQueueSend(RXmessageQueue, &(message.data), pdMS_TO_TICKS(15));
 
-                if(c <= 6*configParam.limits[0]){
-                    taskEXIT_CRITICAL(&criticalMutex);
-                    ESP_LOGE("aaa", "sync2: %lu", c);
-                    state = WAITING;
-                    break;
-                }
-
-                gpio_set_level(2, 0);
-
-                message.data[0] = s_ReadByte(pin);
-                const uint8_t flag = message.data[0]? message.data[0]: sizeof(struct DCP_Message_L3_t)+1;
-
-                for (int i = 1; i < flag; ++i){
-                    gpio_set_level(2, 1);
-                    message.data[i] = s_ReadByte(pin);
-                    gpio_set_level(2, 0);
-                }
-
-                taskEXIT_CRITICAL(&criticalMutex);
-
-                buffer.data = malloc(flag * sizeof(uint8_t));
-                if (!buffer.data){
-                    ESP_LOGE(TAG, "could not allocate memory to receive message");
-                    state = WAITING;
-                    continue;
-                }
-
-                memmove(buffer.data, message.data, flag);
-
-                xQueueSend(RXmessageQueue, &(buffer.data), pdMS_TO_TICKS(10));
-
-                gpio_set_level(2, 1);
                 state = WAITING;
                 break;
             default:
-                ESP_LOGE(TAG, "this code should not be executed, possible corruption");
+                Log(TAG, "this code should not be executed, possible corruption");
                 break;
         }
     }
 }
 
-bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
-
-    if (mode.addr == 0) return false;
-
-    if (busMode.addr != 0){
-        busMode = mode;
-        return true;
-    }
-
-    gpio_set_direction(2, GPIO_MODE_OUTPUT);
-
-    gpio_num_t pin = busPin;
-    CLOCK_TO_TIME = 1.0/esp_clk_cpu_freq();
-
-    gpio_config_t conf = {
-        .pin_bit_mask = 1<<pin,
-        .mode = GPIO_MODE_INPUT,
-        .intr_type = GPIO_INTR_NEGEDGE
-    };
-    
-    if(gpio_config(&conf)) return false;
-    
-    RXmessageQueue = xQueueCreate(8, sizeof(uint8_t*));
-    if (!RXmessageQueue){
-        ESP_LOGE(TAG, "could not create RX message queue");
-
-        return false;
-    } 
-    ESP_LOGD(TAG, "RX queue created");
-
-    TXmessageQueue = xQueueCreate(8, sizeof(uint8_t*));
-    if (!TXmessageQueue){
-        ESP_LOGE(TAG, "could not create TX message queue");
-
-        vQueueDelete(RXmessageQueue);
-
-        return false;
-    } 
-    ESP_LOGD(TAG, "TX queue created");
-
-    busMode = mode;
-    configParam.delta = deltaLUT[busMode.speed];
-    configParam.moe = .02*configParam.delta;
-
-    configParam.limits[0] = ((configParam.delta - configParam.moe)*1e-6)/CLOCK_TO_TIME;
-    configParam.limits[1] = ((configParam.delta + configParam.moe)*1e-6)/CLOCK_TO_TIME;
-
-    ESP_LOGV(TAG, "transmission limits: [%lu ~ %lu]ticks", configParam.limits[0], configParam.limits[1]);
-    ESP_LOGV(TAG, "transmission limits: [%.2f ~ %.2f]us", configParam.delta - configParam.moe, configParam.delta + configParam.moe);
-
-    xTaskCreate(busHandler, "DCP bus handler", 2*1024, &pin, configMAX_PRIORITIES-2, &busTask);
-
-    if (!busTask){
-        ESP_LOGE(TAG, "could not create bus arbitrator task");
-
-        vQueueDelete(RXmessageQueue);
-        vQueueDelete(TXmessageQueue);
-        
-        return false;
-    }
-    ESP_LOGI(TAG, "bus arbitrator task created");
-
-    if(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3) || gpio_isr_handler_add(pin, BusISR, NULL)){
-        ESP_LOGE(TAG, "could not register gpio ISR");
-
-        vTaskDelete(busTask);
-
-        vQueueDelete(RXmessageQueue);
-        vQueueDelete(TXmessageQueue);
-
-        return false;
-    }
-    ESP_LOGD(TAG, "Installed ISR handler");
-
-    return true;
-}
-
-DCP_Data_t* CreateMessage(const struct DCP_Message_t* message){
-
-    return NULL;
-}
-
 bool SendMessage(const DCP_Data_t message){
-
 
 #ifdef ESP_LOGD
     if (message.message->type){
-        ESP_LOGD(TAG, "sending message: %s", message.message->generic.payload);
+        Log(TAG, "sending message: %s", message.message->generic.payload);
     } else {
-        ESP_LOGD(TAG, "sending L3 message");
+        Log(TAG, "sending L3 message");
     }
 #endif
 
 
     if (xQueueSend(TXmessageQueue, (void*)&(message.data), portMAX_DELAY) != pdTRUE){
-        ESP_LOGE(TAG, "could not send message to queue");
+        Log(TAG, "could not send message to queue");
         return false;
     }
 
@@ -452,22 +365,7 @@ struct DCP_Message_t* ReadMessage(){
     DCP_Data_t message = {0};
 
     if ((busMode.flags.flags & 0x1) == FLAG_Instant){
-        if (xQueueReceive(RXmessageQueue, &(message.data), portMAX_DELAY) == pdTRUE){
-
-#ifdef ESP_LOGD
-            if (message.message->type){
-                ESP_LOGD(TAG, "generic message received: %s", message.message->generic.payload);
-            } else {
-                    ESP_LOGD(TAG, "L3 message received: %x\t%x\t%x\t%x\t%x\t%x",
-                             message.message->L3.data[0],
-                             message.message->L3.data[1],
-                             message.message->L3.data[2],
-                             message.message->L3.data[3],
-                             message.message->L3.data[4],
-                             message.message->L3.data[5]
-                             );
-            }
-#endif
+        if (xQueueReceive(RXmessageQueue, &(message.data), 0) == pdTRUE){
 
             return message.message;
         }
@@ -476,21 +374,6 @@ struct DCP_Message_t* ReadMessage(){
     }
 
     if (xQueueReceive(RXmessageQueue, &(message.data), portMAX_DELAY) == pdTRUE){
-
-#ifdef ESP_LOGD
-            if (message.message->type){
-                ESP_LOGD(TAG, "generic message received: %s", message.message->generic.payload);
-            } else {
-                    ESP_LOGD(TAG, "L3 message received: %x\t%x\t%x\t%x\t%x\t%x",
-                             message.message->L3.data[0],
-                             message.message->L3.data[1],
-                             message.message->L3.data[2],
-                             message.message->L3.data[3],
-                             message.message->L3.data[4],
-                             message.message->L3.data[5]
-                             );
-            }
-#endif
 
         return message.message;
     }
