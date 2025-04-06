@@ -182,7 +182,7 @@ void _Noreturn busHandler(void* arg){
     //negative skews in us to be added to the timings
     const unsigned int skews[4][5] = {
         //listening, sync, bitsync, 0, 1
-        {0, 20, 0, 3, 3},
+        {0, 20, 0, 4, 4},
         {0, 25, 0, 2, 1},
         {0, 20, 0, 2, 2},
         {0, 20, 0, 1, 0}

@@ -84,10 +84,7 @@ static uint8_t s_ReadByte(const unsigned int pin){
 void BusISR(void* arg){
 
     const uint16_t pin = (uint16_t)arg;
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     static uint8_t data[0xFF];
-
-    vTaskNotifyGiveFromISR(busTask, &xHigherPriorityTaskWoken);
 
     //reading incoming data
     gpio_set_direction(pin, 1);
@@ -99,13 +96,11 @@ void BusISR(void* arg){
     toggle_debug_pin();
     for (reset_clock_tick(); gpio_get_level(pin) == 1; ){
         if(get_clock_tick() > 10*configParam.limits[1]){
-            portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
             return;
         }
     }
 
     if(get_clock_tick() <= 6*configParam.limits[0]){
-        portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
         return;
     }
 
@@ -119,6 +114,7 @@ void BusISR(void* arg){
         toggle_debug_pin();
     }
 
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xQueueSendFromISR(isrq, data, &xHigherPriorityTaskWoken);
     toggle_debug_pin();
 
@@ -156,10 +152,10 @@ static inline bool s_SendBytes(unsigned int const pin, uint8_t const size, uint8
             Delay(delays[1] + delays[2]);
             gpio_set_direction(pin, 1);
 
+            toggle_debug_pin();
             //collision
             if(gpio_get_level(pin) == 0){
                 return true;
-
             }
         }
     }
@@ -181,7 +177,7 @@ _Noreturn void busHandler(void* arg){
     const uint32_t freqMHz = get_clock_speed()/1e6;
 
     //TODO change this BS
-#ifdef CONFIG_IDF_TARGET_ESP32C3
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
 
     //negative skews in us to be added to the timings
     const unsigned int skews[4][4] = {
@@ -190,6 +186,15 @@ _Noreturn void busHandler(void* arg){
         {0, 25, 2, 1},
         {0, 20, 2, 2},
         {0, 20, 1, 0}
+    };
+
+#elif defined(rp2350)
+
+    const unsigned int skews[4][4] = {
+        {0, 10, 3, 4},
+        {0, 0, 0, 0},
+        {0, 0, 0, 0},
+        {0, 0, 0, 0}
     };
 
 #else 
@@ -233,6 +238,7 @@ _Noreturn void busHandler(void* arg){
                     state = WAITING;
                     continue;
                 }
+                taskENTER_CRITICAL();
 
                 toggle_debug_pin();
                 ulTaskNotifyValueClear(busTask, UINT_MAX);

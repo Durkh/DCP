@@ -42,7 +42,7 @@ void Log(char const * const tag, char const * const msg, ...){
 }
 
 void gpio_set_direction(unsigned int pin, unsigned int dir){
-    gpio_set_dir(pin, dir == 0 ? GPIO_OUT : GPIO_IN);
+    gpio_set_dir(pin, dir == 0); //dir == true: out; dir == false: in
 }
 
 void gpio_set_level(unsigned int pin, unsigned int level){
@@ -50,12 +50,16 @@ void gpio_set_level(unsigned int pin, unsigned int level){
 }
 
 int gpio_get_level(unsigned int pin){
+
+    //we have to burn some cycles
+    for (int i = 0; i<20; ++i) asm volatile ("nop");
+
     return gpio_get(pin);
 }
 
 void toggle_debug_pin(){
     //TODO change hardcode
-    gpio_xor_mask(1u << 25);
+    gpio_xor_mask(1u << 25 | 1u << 28);
 }
 
 uint32_t get_clock_speed(){
@@ -99,7 +103,9 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
 
     // Initialize GPIO
     gpio_init(busPin);
+    gpio_pull_up(busPin);
     gpio_set_dir(busPin, GPIO_IN);
+    gpio_put(busPin, 0);
 
     gpio_init(25);
     gpio_set_dir(25, GPIO_OUT);
