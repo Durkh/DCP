@@ -115,6 +115,8 @@ bool DCPInit(const unsigned int busPin, const DCP_MODE mode){
         return true;
     }
 
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 1);
+
     /*
     HAL_GPIO_WritePin(GPIO_BANK, busPin, GPIO_PIN_RESET);
 

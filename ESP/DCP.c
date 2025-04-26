@@ -222,7 +222,7 @@ void _Noreturn busHandler(void* arg){
     while(1){
 
 #ifdef DEBUG_PIN
-        gpio_set_level(DEBUG_PIN, 0);
+        gpio_set_level(DEBUG_PIN, 1);
 #endif
 
         switch(state){
@@ -238,7 +238,7 @@ void _Noreturn busHandler(void* arg){
                 taskENTER_CRITICAL(&criticalMutex);
 
 #ifdef DEBUG_PIN
-                gpio_set_level(DEBUG_PIN, 1);
+                gpio_set_level(DEBUG_PIN, 0);
 #endif
                 ulTaskNotifyValueClear(busTask, UINT_MAX);
                 //protocol piority delay
@@ -254,7 +254,7 @@ void _Noreturn busHandler(void* arg){
                 }
 
 #ifdef DEBUG_PIN
-                gpio_set_level(DEBUG_PIN, 0);
+                gpio_set_level(DEBUG_PIN, 1);
 #endif
                 __attribute__((fallthrough));
             case STARTING:
@@ -273,7 +273,7 @@ void _Noreturn busHandler(void* arg){
                 //bit sync signal
                 //high part
 #ifdef DEBUG_PIN
-                gpio_set_level(DEBUG_PIN, 1);
+                gpio_set_level(DEBUG_PIN, 0);
 #endif
                 (void)gpio_set_direction(pin, GPIO_MODE_INPUT);
                 Delay((uint32_t)(8 * delays[2]));
@@ -285,7 +285,7 @@ void _Noreturn busHandler(void* arg){
                 Delay((uint32_t)(8 * delays[2]));
 
 #ifdef DEBUG_PIN
-                gpio_set_level(DEBUG_PIN, 0);
+                gpio_set_level(DEBUG_PIN, 1);
 #endif
 
                 //leaving the bus still low not to interfere in the first bit
@@ -306,7 +306,7 @@ void _Noreturn busHandler(void* arg){
                 taskEXIT_CRITICAL(&criticalMutex);
 
 #ifdef DEBUG_PIN
-                gpio_set_level(DEBUG_PIN, 0);
+                gpio_set_level(DEBUG_PIN, 1);
 #endif
                 if (collision){
                     ESP_LOGV(TAG, "Collision detected");
